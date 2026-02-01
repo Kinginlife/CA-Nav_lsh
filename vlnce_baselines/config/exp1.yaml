@@ -1,0 +1,33 @@
+BASE_TASK_CONFIG_PATH: habitat_extensions/config/zs_vlnce_task.yaml
+SIMULATOR_GPU_IDS: [0]
+TORCH_GPU_ID: 0
+TORCH_GPU_IDS: [0]
+GPU_NUMBERS: 1
+NUM_ENVIRONMENTS: 1
+TENSORBOARD_DIR: data/tensorboard_dirs/
+CHECKPOINT_FOLDER: data/checkpoints/
+EVAL_CKPT_PATH_DIR: data/checkpoints/
+RESULTS_DIR: data/logs/eval_results/
+VIDEO_DIR: data/logs/video/
+KEYBOARD_CONTROL: 0 # 是否启用键盘控制（0/1；多用于交互式调试，评估一般关）
+
+
+SENSORS: ['RGB_SENSOR', 'DEPTH_SENSOR']
+
+MAP:  # 地图/建图/可视化相关的项目扩展配置（具体由你们的 mapper 或 trainer 读取）
+  VISUALIZE: False # 是否实时可视化地图/中间结果
+  PRINT_IMAGES: False  # 是否把中间图像输出到磁盘
+  REPVITSAM: 1  # 项目自定义开关/模式位（看命名可能与 RepViT/SAM 感知模块有关；1=启用或选择某个版本）
+
+EVAL:
+  USE_CKPT_CONFIG: False  # 是否使用 checkpoint 内保存的 config 覆盖当前 config（False=以当前 yaml/opts 为准）
+  SAVE_RESULTS: True
+  SPLIT: val_unseen
+  MIN_CONSTRAINT_STEPS: 10 # 约束/规划相关的最小步数阈值
+  MAX_CONSTRAINT_STEPS: 25 # 约束/规划相关的最大步数阈值
+  SCORE_THRESHOLD: 0.5
+  VALUE_THRESHOLD: 0.30
+  DECISION_THRESHOLD: 0.4
+  FMM_WAYPOINT_THRESHOLD: 2.0
+  FMM_GOAL_THRESHOLD: 1.0
+  CHANGE_THRESHOLD: -0.03 # 变化阈值（项目自定义：例如得分/价值下降到某阈值触发重规划或策略切换）

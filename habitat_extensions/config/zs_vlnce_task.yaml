@@ -1,0 +1,69 @@
+SEED: 0
+ENVIRONMENT:
+  MAX_EPISODE_STEPS: 250
+SIMULATOR:
+  ACTION_SPACE_CONFIG: v1   # 动作空间版本/预设（决定动作集合与动作参数的定义方式）
+  AGENT_0:  # 第 0 个智能体（通常单智能体就用它）
+    SENSORS: [RGB_SENSOR, DEPTH_SENSOR] # agent 挂载的传感器列表（这里启用 RGB + 深度）
+    HEIGHT: 0.88  # agent 相机/主体高度（米），影响视角与可见性
+    RADIUS: 0.1   # agent 碰撞体半径（米），影响可通行性与碰撞检测
+  FORWARD_STEP_SIZE: 0.25   # MOVE_FORWARD 每步前进距离（米），影响轨迹离散化与路径长度
+  TURN_ANGLE: 30
+  HABITAT_SIM_V0:
+    GPU_DEVICE_ID: 0
+    ALLOW_SLIDING: True  # 碰撞时是否允许“贴墙滑动”（True 更易绕过障碍、轨迹更连续）
+  RGB_SENSOR:
+    WIDTH: 640
+    HEIGHT: 480
+    HFOV: 79
+    POSITION: [0, 0.88, 0] # 传感器相对 agent 原点的位置（x,y,z），y 通常与 HEIGHT 对齐
+    TYPE: HabitatSimRGBSensor
+  DEPTH_SENSOR:
+    WIDTH: 640
+    HEIGHT: 480
+    HFOV: 79
+    MIN_DEPTH: 0.5  # 最小有效深度（米）；更近的深度会被裁剪/置为无效
+    MAX_DEPTH: 5.0  # 最大有效深度（米）；更远的深度会被裁剪
+    POSITION: [0, 0.88, 0]
+  TYPE:
+    Sim-v1
+TASK:
+  TYPE: VLN-v0
+  SUCCESS_DISTANCE: 3.0
+  SENSORS: [
+    INSTRUCTION_SENSOR, # 自然语言指令（VLN 的核心输入）
+    SENSOR_POSE_SENSOR, # 传感器位姿/姿态（用于对齐或调试，具体实现依项目扩展）
+    LLM_SENSOR, # LLM 相关输入/回复（看项目实现，通常读取 DATASET.LLM_REPLYS_PATH 并注入 observation）
+    POSITION_SENSOR, # 当前位置（通常是 (x,y,z) 或栅格位置）
+    HEADING_SENSOR  # 朝向/航向角（通常是 yaw 或 heading embedding）
+  ]
+  INSTRUCTION_SENSOR_UUID: instruction   # 指令在 observation 字典里的 key（模型/Trainer 会用它取指令）
+  POSSIBLE_ACTIONS: [STOP, MOVE_FORWARD, TURN_LEFT, TURN_RIGHT, LOOK_UP, LOOK_DOWN]
+  MEASUREMENTS: [
+    DISTANCE_TO_GOAL,
+    SUCCESS,
+    SPL,
+    NDTW,
+    PATH_LENGTH,
+    ORACLE_SUCCESS,
+    STEPS_TAKEN,
+    POSITION
+  ]
+  SUCCESS:
+    SUCCESS_DISTANCE: 3.0
+  SPL:
+    SUCCESS_DISTANCE: 3.0
+  NDTW:
+    SUCCESS_DISTANCE: 3.0
+    GT_PATH: data/datasets/R2R_VLNCE_v1-3_preprocessed/{split}/{split}_gt.json.gz
+  SDTW:
+    SUCCESS_DISTANCE: 3.0
+    GT_PATH: data/datasets/R2R_VLNCE_v1-3_preprocessed/{split}/{split}_gt.json.gz
+  ORACLE_SUCCESS:
+    SUCCESS_DISTANCE: 3.0
+DATASET:
+  TYPE: VLN-CE-v1 # 数据集类型/注册名（Habitat dataset loader 用它来实例化）
+  SPLIT: val_unseen
+  DATA_PATH: data/datasets/R2R_VLNCE_v1-3_preprocessed/{split}/{split}.json.gz
+  SCENES_DIR: data/scene_datasets/
+  LLM_REPLYS_PATH: data/datasets/LLM_REPLYS_VAL_UNSEEN/llm_reply_valunseen1839.json # LLM 回复/缓存文件（run_mp.py 会读取它来拆分 episode）
