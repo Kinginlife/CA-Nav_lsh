@@ -158,7 +158,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         print("start to initialize policy")
         # print(type(self.device))
         self.segment_module = GroundedSAM(self.config, self.device)
-        #？？？？？？
+
         self.mapping_module = Semantic_Mapping(self.config.MAP).to(self.device)
         self.mapping_module.eval()
         
@@ -719,11 +719,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             eps_to_eval = min(self.config.EVAL.EPISODE_COUNT, sum(self.envs.number_of_episodes))# 否则取 min
             
         self.state_eps = {}# {episode_id: metric_dict}
-        print(
-            f"[DEBUG] EPISODES_ALLOWED={episodes_allowed} "
-            f"type={type(episodes_allowed)} eps_to_eval={eps_to_eval} "
-            f"envs.number_of_episodes={self.envs.number_of_episodes}"
-        )
+        
         t1 = time.time()
         for i in tqdm(range(eps_to_eval)):
             self.rollout()# 跑一个 episode
