@@ -24,6 +24,7 @@ from habitat_baselines.common.base_trainer import BaseTrainer
 from habitat_baselines.common.environments import get_env_class
 from habitat.sims.habitat_simulator.actions import HabitatSimActions
 from habitat_baselines.common.baseline_registry import baseline_registry
+from habitat_baselines.utils.common import generate_video
 
 from vlnce_baselines.utils.map_utils import *
 from vlnce_baselines.map.value_map import ValueMap
@@ -37,6 +38,12 @@ from vlnce_baselines.common.utils import gather_list_and_concat, get_device
 from vlnce_baselines.map.semantic_prediction import GroundedSAM
 from vlnce_baselines.common.constraints import ConstraintsMonitor
 from vlnce_baselines.utils.constant import base_classes, map_channels
+from vlnce_baselines.map.concept_object_map import (
+    LocalCLIP,
+    ConceptObjectMap,
+    GoalPriorProjector,
+    make_intrinsics_from_hfov,
+)
 
 from pyinstrument import Profiler
 import warnings
@@ -100,7 +107,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             self.config, 
             get_env_class(self.config.ENV_NAME),
             auto_reset_done=False, # done 后不自动 reset（由 rollout 控制）
-            episodes_allowed=self.config.TASK_CONFIG.DATASET.EPISODES_ALLOWED,
+            #episodes_allowed=self.config.TASK_CONFIG.DATASET.EPISODES_ALLOWED,
+            episodes_allowed=['1501']
         )
         print(f"local rank: {self.local_rank}, num of episodes: {self.envs.number_of_episodes}")
         self.detected_classes = OrderedSet() # 维护“已检测到的类别集合”（顺序稳定，用作 mask 通道索引）
@@ -169,6 +177,18 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         self.policy.reset()
         
         self.constraints_monitor = ConstraintsMonitor(self.config, self.device) #ConstraintsMonitor(self.config, self.device)  # 约束检查模块（看 obs/detections/pose 判断是否满足）
+        
+        
+        # ConceptGraphs-style object map (方案 B)
+        self.clip_encoder = LocalCLIP(device=self.device)
+        self.object_map = ConceptObjectMap(self.config, self.device)
+        self.goal_projector = GoalPriorProjector(self.map_shape, self.resolution / 100.0)  # resolution in meters
+        self.intrinsics = make_intrinsics_from_hfov(
+            self.config.TASK_CONFIG.SIMULATOR.RGB_SENSOR.HFOV,
+            self.width,
+            self.height,
+        )
+        self.goal_heatmap_weight = getattr(self.config.EVAL, "GOAL_HEATMAP_WEIGHT", 0.5)  # λ for goal prior fusion
         
     def _concat_obs(self, obs: Observations) -> np.ndarray:# 拼接 RGB 与 depth 成一个 state 张量
         rgb = obs['rgb'].astype(np.uint8)
@@ -504,13 +524,64 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         self.mapping_module.reset()
         self.value_map_module.reset()
         self.history_module.reset()
+        self.object_map.reset()
     
+    def _update_object_map(self, obs: Observations, pose: np.ndarray = None) -> None:
+        if self.current_detections is None:
+            return
+
+        depth_raw = obs["depth"].squeeze(-1) if getattr(obs["depth"], "ndim", 0) == 3 else obs["depth"]
+        # Habitat depth is typically normalized to [0,1]; convert to meters using sensor config
+        min_d = float(self.config.TASK_CONFIG.SIMULATOR.DEPTH_SENSOR.MIN_DEPTH)
+        max_d = float(self.config.TASK_CONFIG.SIMULATOR.DEPTH_SENSOR.MAX_DEPTH)
+        depth = min_d + depth_raw * (max_d - min_d)
+
+        if pose is None:
+            pose_arr = np.array(obs.get("sensor_pose", []), dtype=np.float32)
+        else:
+            pose_arr = np.array(pose, dtype=np.float32)
+
+        yaw = None
+        heading = obs.get("heading", None)
+        if heading is not None:
+            try:
+                yaw = float(np.array(heading).reshape(-1)[0])
+            except Exception:
+                yaw = None
+
+        if pose_arr.shape[0] >= 4:
+            pose_arr = pose_arr[:4]
+        elif pose_arr.shape[0] == 3:
+            if yaw is None:
+                yaw = 0.0
+            pose_arr = np.concatenate([pose_arr, np.array([yaw], dtype=np.float32)], axis=0)
+        else:
+            return
+
+        self.object_map.update(
+            detections=self.current_detections,
+            rgb=obs["rgb"],
+            depth=depth,
+            intrinsics=self.intrinsics,
+            pose=pose_arr,
+            clip_encoder=self.clip_encoder,
+            class_names=self.classes,
+        )
+
     def rollout(self):# 执行单个 episode rollout（核心闭环：obs->map->value->policy->action）
         """
         execute a whole episode which consists of a sequence of sub-steps
         """
+        rgb_frames = []
         self._maps_initialization()# reset env + 初始化地图 + 解析 llm
         full_pose, obs, dones, infos = self._look_around() # 环视建图 + 初始化 action
+        if len(self.config.VIDEO_OPTION) > 0:
+            try:
+                os.makedirs(self.config.VIDEO_DIR, exist_ok=True)
+            except Exception:
+                pass
+        if obs is not None and len(obs) > 0 and ("rgb" in obs[0]):
+            rgb_frames.append(obs[0]["rgb"].astype(np.uint8))
         print("\n ========== START TO NAVIGATE ==========\n")
         
         trajectory_points = []
@@ -541,7 +612,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             constraint_steps += 1
             position = full_pose[0][:2] * 100 / self.resolution# 把米->cm->格（依 pose 定义）
             heading = full_pose[0][-1]  # 航向角
-            print("full pose: ", full_pose[0])
+            print("DEBUG full_pose[0]: ", full_pose[0], "shape=", np.array(full_pose[0]).shape)
             y, x = min(int(position[0]), self.map_shape[0] - 1), min(int(position[1]), self.map_shape[1] - 1)# 限幅到 map 内
             self.visited[x, y] = 1 # 标记访问（注意 x/y 顺序这里做了交换）
             trajectory_points.append((y, x)) # 轨迹点（用于 history）
@@ -654,15 +725,37 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                     actions.append(self._action)# 使用 policy 给出的动作
             outputs = self.envs.step(actions)# 环境执行
             obs, _, dones, infos = [list(x) for x in zip(*outputs)]# 解包返回
+            if len(self.config.VIDEO_OPTION) > 0 and obs is not None and len(obs) > 0 and ("rgb" in obs[0]):
+                try:
+                    rgb_frames.append(obs[0]["rgb"].astype(np.uint8))
+                except Exception:
+                    pass
             
             if dones[0]:
                 self._calculate_metric(infos)# episode 结束：计算指标
+                if len(self.config.VIDEO_OPTION) > 0:
+                    try:
+                        metrics = self.state_eps.get(self.current_episode_id, {})
+                        generate_video(
+                            video_option=self.config.VIDEO_OPTION,
+                            video_dir=self.config.VIDEO_DIR,
+                            images=rgb_frames,
+                            episode_id=self.current_episode_id,
+                            checkpoint_idx=0,
+                            metrics=metrics,
+                            tb_writer=None,
+                            fps=10,
+                        )
+                    except Exception as e:
+                        print(f"video generation failed: {e}")
                 break
             batch_obs = self._batch_obs(obs)# 预处理 obs（含动态语义通道
             poses = torch.from_numpy(np.array([item['sensor_pose'] for item in obs])).float().to(self.device)
             self.mapping_module(batch_obs, poses)# 融合到地图
             full_map, full_pose, one_step_full_map = \
                 self.mapping_module.update_map(step, self.detected_classes, self.current_episode_id)
+            # 更新 object map（每步）
+            self._update_object_map(obs[0], full_pose[0])
             self.mapping_module.one_step_full_map.fill_(0.)
             self.mapping_module.one_step_local_map.fill_(0.)
             
@@ -697,7 +790,26 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             blip_value = blip_value.detach().cpu().numpy()
             value_map = self.value_map_module(step, full_map[0], self.floor, self.one_step_floor, self.collision_map, 
                                   blip_value, full_pose[0], self.detected_classes, self.current_episode_id) # 更新 value map
-            self._action = self.policy(self.value_map_module.value_map[1] * history_map, self.collision_map, # 用 value_map*history_map 做决策
+            # ConceptGraphs 目标先验：用 object map 检索并投影成 2D heatmap
+            text_ft = self.clip_encoder.encode_text(self.destination)
+            goal_objs = self.object_map.query(text_ft, top_k=5)
+            goal_heatmap = self.goal_projector(goal_objs, self.traversible)
+            
+            # 门控融合逻辑：
+            # 1. 如果当前视角能看到清晰目标（value_map 非空且有一定强度），则不使用或减少使用先验
+            # 2. 如果当前视角迷茫（empty_value_map 计数增加），则加大先验权重引导探索
+            value_pixel_count = np.sum(self.value_map_module.value_map[1] > 0.1)
+            is_lost = (value_pixel_count < 100) or (empty_value_map > 0)
+            
+            dynamic_weight = self.goal_heatmap_weight if is_lost else (self.goal_heatmap_weight * 0.2)
+            
+            # 融合到 policy 的 value 输入
+            value_for_policy = self.value_map_module.value_map[1] * history_map + dynamic_weight * goal_heatmap
+            
+            if is_lost and len(goal_objs) > 0:
+                print(f"DEBUG: Gating Active (is_lost={is_lost}, pixels={value_pixel_count}), using weight {dynamic_weight:.2f}")
+
+            self._action = self.policy(value_for_policy, self.collision_map, # 用动态权重的 goal_heatmap 做决策
                                     full_map[0], self.floor, self.traversible, 
                                     full_pose[0], self.frontiers, self.detected_classes,
                                     self.destination_class, self.classes, search_destination, 
