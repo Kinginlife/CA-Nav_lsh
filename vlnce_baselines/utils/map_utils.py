@@ -305,19 +305,16 @@ def angle_to_vector(angle: float) -> np.ndarray:
 
 def process_destination(destination: np.ndarray, full_map: np.ndarray, classes: List) -> np.ndarray:
     """ 
-    Legacy destination processing (centroid -> nearest reachable).
-
-    Note: The NRP logic for the final destination waypoint is implemented in
-    `process_destination2(destination, floor, traversible)` and used by the policy.
+    destination could be some small objects, so we dilate them first
+    and then remove small objects
     """
     floor = process_floor(full_map, classes)
     traversible = get_traversible_area(full_map, classes)
-
     destination = dilation(destination, selem=disk(5))
     destination = remove_small_objects(destination.astype(bool), min_size=64).astype(np.uint8)
     nb_components, output, stats, centroids = cv2.connectedComponentsWithStats(destination)
     if len(centroids) > 1:
-        centroid = centroids[1]  # the first one is background
+        centroid = centroids[1] # the first one is background
         waypoint = np.array([int(centroid[1]), int(centroid[0])])
         waypoint = get_nearest_nonzero_waypoint(np.logical_and(floor, traversible), waypoint)
         return waypoint
@@ -328,93 +325,17 @@ def process_destination2(destination: np.ndarray, floor: np.ndarray, traversible
     """ 
     destination could be some small objects, so we dilate them first
     and then remove small objects
-
-    Refactor (NRP / Nearest Reachable Point) with fallbacks:
-    1) Prefer NRP on `floor` (explored free space) for a conservative, reliable stop point.
-    2) If the resulting point is still far from the target boundary (>1.5m), fallback to NRP on `traversible`.
-    3) If still unavailable, fallback to centroid->nearest traversible.
-
-    Coordinate convention:
-    - All masks here are in map ndarray coordinates: (row=x, col=y).
-    - Returned waypoint is also (x, y) and can be passed to FMMPlanner.set_goal().
     """
-
-    def _extract_boundary_pts(mask: np.ndarray) -> np.ndarray:
-        kernel = np.ones((3, 3), np.uint8)
-        eroded = cv2.erode(mask.astype(np.uint8), kernel, iterations=1)
-        boundary = (mask.astype(np.uint8) - eroded) > 0
-        pts = np.argwhere(boundary)
-        if pts.shape[0] == 0:
-            pts = np.argwhere(mask > 0)
-        return pts
-
-    def _nrp_waypoint(navigable_area: np.ndarray, boundary_pts: np.ndarray) -> tuple:
-        nav_pts = np.argwhere(navigable_area.astype(bool))
-        if nav_pts.shape[0] == 0 or boundary_pts.shape[0] == 0:
-            return None, None
-
-        # subsample boundary for speed if huge
-        if boundary_pts.shape[0] > 5000:
-            idx = np.random.choice(boundary_pts.shape[0], 5000, replace=False)
-            boundary_use = boundary_pts[idx]
-        else:
-            boundary_use = boundary_pts
-
-        best_pt = None
-        best_dist2 = 1e18
-        chunk = 20000
-        for i in range(0, nav_pts.shape[0], chunk):
-            nav_chunk = nav_pts[i : i + chunk]
-            diff = nav_chunk[:, None, :] - boundary_use[None, :, :]
-            d2 = np.sum(diff * diff, axis=2)
-            min_d2 = np.min(d2, axis=1)
-            j = int(np.argmin(min_d2))
-            if float(min_d2[j]) < best_dist2:
-                best_dist2 = float(min_d2[j])
-                best_pt = nav_chunk[j]
-
-        if best_pt is None:
-            return None, None
-
-        return np.array([int(best_pt[0]), int(best_pt[1])]), best_dist2
-
-    def _centroid_fallback(mask: np.ndarray, nav: np.ndarray) -> np.ndarray:
-        nb_components, output, stats, centroids = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
-        if len(centroids) <= 1:
-            return None
-        centroid = centroids[1]
-        waypoint = np.array([int(centroid[1]), int(centroid[0])])
-        return get_nearest_nonzero_waypoint(nav.astype(bool), waypoint)
-
-    # Light dilation to make thin masks more stable, then denoise.
     destination = dilation(destination, selem=disk(5))
     destination = remove_small_objects(destination.astype(bool), min_size=64).astype(np.uint8)
-
-    if destination.sum() == 0:
+    nb_components, output, stats, centroids = cv2.connectedComponentsWithStats(destination)
+    if len(centroids) > 1:
+        centroid = centroids[1] # the first one is background
+        waypoint = np.array([int(centroid[1]), int(centroid[0])])
+        waypoint = get_nearest_nonzero_waypoint(traversible, waypoint)
+        return waypoint
+    else:
         return None
-
-    boundary_pts = _extract_boundary_pts(destination)
-    if boundary_pts.shape[0] == 0:
-        return None
-
-    # 1.5m threshold with MAP_RESOLUTION=5cm => 150cm / 5 = 30 cells
-    max_dist_cells = 30
-    max_dist2 = float(max_dist_cells * max_dist_cells)
-
-    # 1) floor NRP
-    floor_wp, floor_d2 = _nrp_waypoint(floor, boundary_pts)
-
-    # 2) traversible NRP fallback if floor result is missing OR too far
-    if floor_wp is None or (floor_d2 is not None and floor_d2 > max_dist2):
-        trav_wp, trav_d2 = _nrp_waypoint(traversible, boundary_pts)
-        if trav_wp is not None:
-            return trav_wp
-
-    if floor_wp is not None:
-        return floor_wp
-
-    # 3) centroid->nearest traversible fallback
-    return _centroid_fallback(destination, traversible)
 
 
 def angle_and_direction(a: np.ndarray, b: np.ndarray, turn_angle: float) -> Tuple:
