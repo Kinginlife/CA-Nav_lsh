@@ -27,22 +27,22 @@ class DirectionMap(nn.Module):
     def reset(self):
         self.direction_map = np.ones(self.shape)
         
-    def _create_sector_mask(self, position: np.ndarray, heading: float, direction_weight: float=1.5):# 生成“方向扇形权重图”
+    def _create_sector_mask(self, position: np.ndarray, heading: float, direction_weight: float=1.5):
         """ 
         arg "position" came from full pose, full pose use standard Cartesian coordinate.
         """
         mask = np.zeros(self.shape)
-        heading = (360 - heading) % 360  # 坐标系转换：把 heading 转成地图内部使用的角度方向
+        heading = (360 - heading) % 360
         angle_high = (heading + self.theta / 2) % 360
         angle_low = (heading - self.theta / 2) % 360
         heading = np.ones(self.shape) * heading
 
-        y, x = np.meshgrid(np.arange(self.shape[0]) - position[0], np.arange(self.shape[1]) - position[1])# 构造从 position 指向每个栅格的向量分量（以 position 为原点）
+        y, x = np.meshgrid(np.arange(self.shape[0]) - position[0], np.arange(self.shape[1]) - position[1])
         distance = np.sqrt(x**2 + y**2)
-        angle = np.arctan2(x, y) * 180 / np.pi # 计算方向角（度），这里使用 arctan2(x,y)（注意顺序是刻意的）
+        angle = np.arctan2(x, y) * 180 / np.pi
         angle = (360 - angle) % 360
 
-        valid_distance = distance <= self.radius * 100 / self.resolution # 半径约束：radius(m)->cm->格
+        valid_distance = distance <= self.radius * 100 / self.resolution
         if angle_high > angle_low:
             valid_angle = (angle_low <= angle) & (angle <= angle_high)
         else:
@@ -52,14 +52,14 @@ class DirectionMap(nn.Module):
         return mask
     
     def forward(self, current_position: np.ndarray, last_five_step_position: np.ndarray, heading: float, 
-                direction: str, step: int, current_episode_id: int) -> np.ndarray: # 根据“语言方向 + 最近运动趋势”产生方向 mask
-        heading_vector = current_position - last_five_step_position# 近 5 步位移向量
+                direction: str, step: int, current_episode_id: int) -> np.ndarray:
+        heading_vector = current_position - last_five_step_position
         if np.linalg.norm(heading_vector) <= 0.2 * 100 / self.resolution:
             heading_angle = heading
         else:
             heading_angle = angle_between_vectors(np.array([1, 0]), heading_vector)
         print("!!!!heading angle: ", heading_angle, direction, "left" in direction)
-        direction = direction_mapping.get(direction, "ambiguous direction") # 把多种表达归一到标准方向；未知则 ambiguous
+        direction = direction_mapping.get(direction, "ambiguous direction")
         if direction == "forward":
             sector_mask = self._create_sector_mask(current_position, heading_angle)
         elif direction == "left":

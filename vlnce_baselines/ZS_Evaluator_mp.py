@@ -166,7 +166,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         print("start to initialize policy")
         # print(type(self.device))
         self.segment_module = GroundedSAM(self.config, self.device)
-
+        #？？？？？？
         self.mapping_module = Semantic_Mapping(self.config.MAP).to(self.device)
         self.mapping_module.eval()
         

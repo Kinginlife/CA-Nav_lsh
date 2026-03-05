@@ -34,6 +34,6 @@ EVAL:
   GOAL_HEATMAP_WEIGHT: 0.25 # 方案B：object map 目标先验 heatmap 融合权重（越大越依赖 CLIP-grounded 目标）
 
 # 方案B：ConceptGraphs-style object map 融合参数（ConceptObjectMap 读取）
-OBJECT_SPATIAL_THRESH: 1.2 # meters：空间匹配阈值（detection->object 融合）
+OBJECT_SPATIAL_THRESH: 0.8 # meters：空间匹配阈值（detection->object 融合）
 OBJECT_VISUAL_THRESH: 0.40 # CLIP cosine：视觉匹配阈值
 OBJECT_EMA_ALPHA: 0.7 # EMA：object center/feature 更新平滑系数
