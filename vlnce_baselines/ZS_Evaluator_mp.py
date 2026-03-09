@@ -107,8 +107,9 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             self.config, 
             get_env_class(self.config.ENV_NAME),
             auto_reset_done=False, # done 后不自动 reset（由 rollout 控制）
-            #episodes_allowed=self.config.TASK_CONFIG.DATASET.EPISODES_ALLOWED,
-            episodes_allowed=['1501']
+            episodes_allowed=self.config.TASK_CONFIG.DATASET.EPISODES_ALLOWED,
+            #episodes_allowed=['1501']
+            
         )
         print(f"local rank: {self.local_rank}, num of episodes: {self.envs.number_of_episodes}")
         self.detected_classes = OrderedSet() # 维护“已检测到的类别集合”（顺序稳定，用作 mask 通道索引）
@@ -384,7 +385,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         print("!!!!!!!!!!!!!!! first destination: ", self.destination)
         # self.destination = self.sub_instructions[0]
         self.last_destination = self.destination    #上一步子指令目标
-        first_landmarks = self.decisions['0']['landmarks']  #TODO 第一个decision没有landmark怎么办？例如turn around
+        first_landmarks = self.decisions['0']['landmarks'] 
         self.destination_class = [item[0] for item in first_landmarks]  # 抽取 landmark 类别名列表
         self.classes = self._process_classes(self.base_classes, self.destination_class)  # 更新 GroundedSAM 的类别提示
         self.constraints_check = [False] * len(self.sub_constraints) # 每个子指令是否完成约束检查
@@ -462,6 +463,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         full_map, full_pose, _ = self.mapping_module.update_map(0, self.detected_classes, self.current_episode_id)# 更新全局地图
         self.mapping_module.one_step_full_map.fill_(0.)# 清空单步 map buffer
         self.mapping_module.one_step_local_map.fill_(0.) #清空单步 local map buffer
+        self.constraint_history = []  # <--- 新增这行
     
     def _look_around(self):# episode 初始环视：原地转圈建图+估计 value map，然后选第一次 action
         print("\n========== LOOK AROUND ==========\n")
@@ -525,6 +527,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         self.value_map_module.reset()
         self.history_module.reset()
         self.object_map.reset()
+        self.constraint_history = []  # <--- 新增这行
     
     def _update_object_map(self, obs: Observations, pose: np.ndarray = None) -> None:
         if self.current_detections is None:
@@ -586,8 +589,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         
         trajectory_points = []
         direction_points = []
-        constraint_steps = 0 # 当前 constraint 已执行步数
-        collided = 0  # 连续“未移动”的计数（用于判断卡住）
+        constraint_steps = 0 
+        collided = 0  
         empty_value_map = 0 # value map 过空的计数（用于触发重新环视）
         direction_map = np.ones(self.map_shape)  # 默认方向图（全 1 表示不施加方向约束）
         direction_map_exist = False # 是否已经生成 direction map
@@ -604,7 +607,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
         self.classes = self._process_classes(self.base_classes, self.destination_class)# 更新分割类别提示列表
         current_constraint = self.sub_constraints[str(current_idx)] # 当前子指令的约束列表
         all_constraint_types = [item[0] for item in current_constraint] # 当前约束类型列表
-        
+
+
         for step in range(12, self.max_step): # 从 12 开始（前 12 步用于环视）
             print(f"\nepisode:{self.current_episode_id}, step:{step}")
             print(f"instr: {self.instruction}")
@@ -648,10 +652,41 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 else: 
                     direction_map = np.ones(self.map_shape) # 非方向约束则不施加方向限制
                 
-                check = self.constraints_monitor(current_constraint, obs[0],  # 检查当前约束是否满足
+                # check = self.constraints_monitor(current_constraint, obs[0],  # 检查当前约束是否满足
+                #                                 self.current_detections, self.classes, 
+                #                                 current_pose, start_check_pose) 
+                # print(current_constraint, check)
+                # ================= MODIFIED: 替换为多帧一致性验证 =================
+                raw_check = self.constraints_monitor(current_constraint, obs[0],  
                                                 self.current_detections, self.classes, 
-                                                current_pose, start_check_pose) 
-                print(current_constraint, check)
+                                                current_pose, start_check_pose)
+                
+                # 初始化历史窗口
+                if not hasattr(self, 'constraint_history'):
+                    self.constraint_history = []
+                
+                # 记录当前帧满足的约束
+                satisfied_now = [str(current_constraint[i]) for i, c in enumerate(raw_check) if c]
+                self.constraint_history.append(satisfied_now)
+                
+                # 维持滑动窗口大小为 3
+                if len(self.constraint_history) > 3:
+                    self.constraint_history.pop(0)
+                    
+                check = []
+                for i, constraint in enumerate(current_constraint):
+                    c_str = str(constraint)
+                    # 方向约束（如turn left）通常基于位移轨迹计算，本身具有连贯性，不需要多帧平滑
+                    if constraint[0] == "direction constraint":
+                        check.append(raw_check[i])
+                    else:
+                        # Location 和 Object 约束：统计最近 3 帧内满足的次数
+                        times_satisfied = sum(1 for history_frame in self.constraint_history if c_str in history_frame)
+                        # 只有当最近3帧中有至少2帧检测到了，才算真正满足（有效抵抗单帧误报，并能弥补单帧漏报）
+                        check.append(times_satisfied >= 2)
+                
+                print(f"Raw check: {raw_check} -> Smoothed check: {check}")
+                # ===============================================================
                 if (len(current_constraint) > 0 
                     and current_constraint[0][0] == "direction constraint" 
                     and check[0] == True):
@@ -680,9 +715,20 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                         current_constraint = self.sub_constraints[str(current_idx)]
                         all_constraint_types = [item[0] for item in current_constraint]
                         current_pose, start_check_pose = None, None
+                        # ======== NEW: 切换子指令时清空历史 ========
+                        self.constraint_history = [] 
+                        # ========================================
                     else:
                         current_constraint, all_constraint_types = [], [] # 所有约束完成
                         print("all constraints are done")
+                        
+                        # ======== NEW: 全部完成时清空历史 ========
+                        self.constraint_history = [] 
+                        # ========================================
+
+                    # else:
+                    #     current_constraint, all_constraint_types = [], [] # 所有约束完成
+                    #     print("all constraints are done")
                     constraint_steps = 0#  重置 constraint 步计数
                     start_to_wait = False  # 结束等待
                     
@@ -764,6 +810,7 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             
             last_pose = current_pose# 记录上一 pose
             current_pose = full_pose[0]# 更新当前 pose
+
             if last_pose is not None and current_pose is not None:
                 displacement = calculate_displacement(last_pose, current_pose, self.resolution) # 计算位移（格/米）
                 if displacement < 0.2 * 100 / self.resolution: # 位移过小：认为发生碰撞/卡住（连续计数）
@@ -771,13 +818,24 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
                 else:
                     collided = 0
                     replan = False
-                if collided >= 30:
-                    replan = True# 连续卡住达到阈值：触发 replan
-                    print(f"{self.current_episode_id}: {collided}\n")
+                # if collided >= 30:
+                #     replan = True# 连续卡住达到阈值：触发 replan
+                #     print(f"{self.current_episode_id}: {collided}\n")
+                #     fname = os.path.join(self.config.EVAL_CKPT_PATH_DIR, 
+                #                         f"r{self.local_rank}_w{self.world_size}_collision_stuck.txt")
+                #     with open(fname, "a") as f:
+                #         f.writelines(f"id: {str(self.current_episode_id)}; step: {str(step)}; collided: {str(collided)}\n")
+
+                # ================= MODIFIED: 及早触发重规划 =================
+                # 原代码为 if collided >= 30:
+                if collided >= 20:  
+                    replan = True
+                    print(f"{self.current_episode_id}: STUCK DETECTED! collided count = {collided}\n")
                     fname = os.path.join(self.config.EVAL_CKPT_PATH_DIR, 
                                         f"r{self.local_rank}_w{self.world_size}_collision_stuck.txt")
                     with open(fname, "a") as f:
                         f.writelines(f"id: {str(self.current_episode_id)}; step: {str(step)}; collided: {str(collided)}\n")
+                # =========================================================
                 
             last_action = current_action# 记录上一 action
             current_action = self._action# 当前 action（policy 输出）
@@ -808,6 +866,8 @@ class ZeroShotVlnEvaluatorMP(BaseTrainer):
             
             if is_lost and len(goal_objs) > 0:
                 print(f"DEBUG: Gating Active (is_lost={is_lost}, pixels={value_pixel_count}), using weight {dynamic_weight:.2f}")
+
+
 
             self._action = self.policy(value_for_policy, self.collision_map, # 用动态权重的 goal_heatmap 做决策
                                     full_map[0], self.floor, self.traversible, 

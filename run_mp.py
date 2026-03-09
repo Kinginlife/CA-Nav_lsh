@@ -49,12 +49,27 @@ def run_exp(exp_name: str, exp_config: str,
     logger.info(f"llm reply file: {config.TASK_CONFIG.DATASET.LLM_REPLYS_PATH}")
     
     # dataset split, start multi-processes
-    num_devices = torch.cuda.device_count() # 获取可用GPU数量
+    num_devices = torch.cuda.device_count()
     print(f'num devices: {num_devices}, num processes: {nprocesses}')
     with open(config.TASK_CONFIG.DATASET.LLM_REPLYS_PATH, 'r') as f:
-        llm_reply_dataset = json.load(f) # 加载LLM回复数据集
-    episode_ids = list(llm_reply_dataset.keys()) # 获取所有episode ID
+        llm_reply_dataset = json.load(f)
+    episode_ids = list(llm_reply_dataset.keys())
+    #111111111
+    # 优先使用配置中的 EPISODES_ALLOWED；若为空则默认跑 1~800
+    # episodes_allowed = config.TASK_CONFIG.DATASET.EPISODES_ALLOWED
+    # if episodes_allowed is not None and len(episodes_allowed) > 0:
+    #     episode_ids = [str(ep_id) for ep_id in episodes_allowed]
+    # else:
+    #     episode_ids = [str(i) for i in range(1, 801)]
+    episode_ids = [str(i) for i in range(1, 801)]
+    #episode_ids = ['20']
+    # 仅保留 LLM 回复文件中真实存在的 episode，并按数值排序
+    valid_episode_ids = set(llm_reply_dataset.keys())
+    episode_ids = [ep_id for ep_id in episode_ids if ep_id in valid_episode_ids]
+    episode_ids = sorted(episode_ids, key=lambda x: int(x))
+
     split_episode_ids = [episode_ids[i::nprocesses] for i in range(nprocesses)]# 将episode ID均匀分配到各个进程
+    
 
     configs = []
     for i, ep_ids in enumerate(split_episode_ids):
@@ -69,12 +84,12 @@ def run_exp(exp_name: str, exp_config: str,
         shared_config.TASK_CONFIG.DATASET.EPISODES_ALLOWED = ep_ids
         shared_config.freeze()
         configs.append(shared_config)
-    # 创建进程池并执行worker函数
+    
     pool = Pool(processes=nprocesses)
-    pool.map(worker, configs)# 并行执行worker函数
+    pool.map(worker, configs)
     pool.close()
     pool.join()
-    fns = glob.glob(config.CHECKPOINT_FOLDER + '/stats_ep_ckpt_*.json')# 查找所有结果文件
+    fns = glob.glob(config.CHECKPOINT_FOLDER + '/stats_ep_ckpt_*.json')
     summary = {}
     for fn in fns:
         with open(fn, 'r') as f:
@@ -99,11 +114,11 @@ def run_exp(exp_name: str, exp_config: str,
         json.dump(summary_metrics, f, indent=2)
 
 def worker(config):
-    seed_everything(config.TASK_CONFIG.SEED) # 设置随机种子
-    torch.backends.cudnn.benchmark = False# 禁用cuDNN自动调优
-    torch.backends.cudnn.deterministic = False # 禁用确定性算法
+    seed_everything(config.TASK_CONFIG.SEED)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
     if torch.cuda.is_available():
-        torch.set_num_threads(1)# 设置每个进程使用1个线程
+        torch.set_num_threads(1)
 
     TRAINER = baseline_registry.get_trainer(config.TRAINER_NAME)
     assert TRAINER is not None, f"{config.TRAINER_NAME} is not supported"

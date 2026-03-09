@@ -72,23 +72,23 @@ class SuperPixelPolicy(nn.Module):
         max_val = np.max(value_map)
         normalized_values = (value_map - min_val) / (max_val - min_val + 1e-5)
         normalized_values[value_map == 0] = 1
-        img = cv2.applyColorMap((normalized_values * 255).astype(np.uint8), cv2.COLORMAP_HOT)
+        img = cv2.applyColorMap((normalized_values * 255).astype(np.uint8), cv2.COLORMAP_HOT)#转成伪彩图 img，给 SLIC 使用
         slic = Slic(num_components=24**2, compactness=100)
         assignment = slic.iterate(img)
         assignment *= valid_mask
-        valid_labels = np.unique(assignment)[1:]
+        valid_labels = np.unique(assignment)[1:] #去0标签
         value_regions = []
         for label in valid_labels:
             mask = np.zeros_like(value_map)
             mask[assignment == label] = 1
             nb_components, output, stats, centroids = \
-                cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
-            if np.sum(output == 1) < 100:
-                continue
-            waypoint = np.array([int(centroids[1][1]), int(centroids[1][0])])
+                cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8) #用连通域分析拿主连通块和质心
+            if np.sum(output == 1) < 100: #小于 100 像素的区域直接丢
+                continue 
+            waypoint = np.array([int(centroids[1][1]), int(centroids[1][0])]) #waypoint 用连通域质心
             value_mask = np.zeros_like(value_map)
             value_mask[waypoint[0] - 5: waypoint[0] + 5, waypoint[1] - 5: waypoint[1] + 5] = 1
-            masked_value = value_mask * value_map
+            masked_value = value_mask * value_map #在质心附近 10x10 小窗取 value 均值，作为该区域代表分数
             if np.sum(masked_value) > 0:
                 value_regions.append((mask, np.mean(masked_value[masked_value != 0]), waypoint))
             else:
@@ -109,16 +109,16 @@ class SuperPixelPolicy(nn.Module):
     def forward(self, full_map: np.ndarray, traversible: np.ndarray, value_map: np.ndarray, collision_map: np.ndarray,
                 detected_classes: OrderedSet, position: Sequence, fmm_dist: np.ndarray, replan: bool, step: int, current_episode_id: int):
         if np.sum(value_map.astype(bool)) < 24**2:
-            best_waypoint = np.array([int(position[0]), int(position[1])])
+            best_waypoint = np.array([int(position[0]), int(position[1])])#当前价值图信息不足直接把当前坐标当 best_waypoint
             best_value = 0.
             sorted_waypoints = [np.array([int(position[0]), int(position[1])])]
             
             return best_waypoint, best_value, sorted_waypoints
         else:
-            sorted_regions = self._get_sorted_region_fast_slic(full_map, traversible, value_map, collision_map, detected_classes)
-            sorted_waypoints, sorted_values = self._sorted_waypoints(sorted_regions)
+            sorted_regions = self._get_sorted_region_fast_slic(full_map, traversible, value_map, collision_map, detected_classes)#用 superpixel/SLIC 把地图区域分块，
+            sorted_waypoints, sorted_values = self._sorted_waypoints(sorted_regions) #从高价值 region 提取候选 waypoint，并排序
             best_waypoint, best_value, sorted_waypoints = \
-                self.waypoint_selector(sorted_waypoints, position, collision_map, value_map, fmm_dist, traversible, replan)
+                self.waypoint_selector(sorted_waypoints, position, collision_map, value_map, fmm_dist, traversible, replan)  #选最终 best_waypoint
                 
             if self.visualize:
                 self._visualize(sorted_regions, value_map, step, current_episode_id)

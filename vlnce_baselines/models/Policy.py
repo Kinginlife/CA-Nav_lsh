@@ -114,14 +114,14 @@ class FusionMapPolicy(nn.Module):# 策略：选择探索点/目标点 -> 用 FMM
         heading = -1 * full_pose[-1]  # heading 取负（坐标系转换：让旋转方向与 ndarray 约定一致）
         rotation_matrix = np.array([[0, -1], 
                                     [1, 0]])  # 旋转矩阵：把向量从一种坐标对齐到另一种（用于 heading_vector）
-        traversible[collision_map == 1] = 0 # 把碰撞区域强制设为不可通行
-        planner = FMMPlanner(self.config, traversible, visualize=self.visualize) # 基于 traversible 建 FMM planner
+        traversible[collision_map == 1] = 0 # 把碰撞区域强制设为不可通行              
+        planner = FMMPlanner(self.config, traversible, visualize=self.visualize)              
         if traversible[waypoint[0], waypoint[1]] == 0:  # waypoint 落在不可通行区域
             goal = get_nearest_nonzero_waypoint(traversible, waypoint)  # 找最近的可通行点作为 goal
         else:
             goal = waypoint
-        planner.set_goal(goal) # 设置 FMM 的 goal（会计算 dist field）
-        self.fmm_dist = planner.fmm_dist # 缓存距离场，后续 superpixel_policy 可能用到
+        planner.set_goal(goal)
+        self.fmm_dist = planner.fmm_dist 
         stg_x, stg_y, stop = planner.get_short_term_goal(position, self.fixed_destination) # 获取 short-term goal（下一步子目标）以及是否 stop
         sub_waypoint = (stg_x, stg_y)
         heading_vector = angle_to_vector(heading)
@@ -251,7 +251,7 @@ class FusionMapPolicy(nn.Module):# 策略：选择探索点/目标点 -> 用 FMM
                 current_detection: sv.Detections, 
                 current_episode_id: int,
                 replan: bool,
-                step: int):  # 从语义通道中提取一个目标 waypoint（实现见 map_utils）
+                step: int):  
         
         x, y, heading = full_pose
         x, y = x * (100 / self.resolution), y * (100 / self.resolution)
@@ -259,11 +259,12 @@ class FusionMapPolicy(nn.Module):# 策略：选择探索点/目标点 -> 用 FMM
         best_waypoint, best_value, sorted_waypoints = self.superpixel_policy(full_map, traversible, value_map, collision_map,
                                                                              detected_classes, position, self.fmm_dist, replan,
                                                                              step, current_episode_id)
+        #调 superpixel_policy 在全图上找“最值得去”的候选 waypoint
         print("current_position's value: ", value_map[min(int(y), self.map_shape - 1), min(int(x), self.map_shape - 1)])
         print("current pose: ", full_pose)
         current_value = value_map[min(int(y), self.map_shape - 1), min(int(x), self.map_shape - 1)]
         max_value = np.max(value_map)
-        if search_destination:
+        if search_destination:#当 current_idx 到最后子指令时，外部会置 search_destination=True，这时 policy 会尝试从当前检测/语义里“锁定最终目标点”，锁定成功后持续朝固定目标走；否则退回 best_waypoint
             destination_waypoint, score = self._search_destination(destination, classes, current_value, max_value,
                                                                    detected_classes, one_step_full_map, 
                                                                    value_map, floor, traversible, current_detection, step)
